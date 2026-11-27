@@ -146,6 +146,14 @@ def main() -> None:
             f"expected={EXPECTED_CTYPES}\nactual={ctypes_signature}"
         )
 
+    # cu_seqlens/chunk_indices 是 device 张量：kernel 直接从 GM 读值，host tiling 只读 shape。
+    header_text = HEADER.read_text(encoding="utf-8")
+    for name in ("cuSeqlensOptional", "chunkIndicesOptional"):
+        if re.search(rf"const\s+aclTensor\s*\*\s*{name}\b", header_text) is None:
+            raise SystemExit(
+                f"ACLNN metadata 必须是 device aclTensor：{name}"
+            )
+
     implementation = IMPLEMENTATION.read_text(encoding="utf-8")
     required_patterns = {
         "final-state selector": r"const\s+bool\s+outputFinalState\s*=\s*"
@@ -215,6 +223,7 @@ def main() -> None:
                 "result": "passed",
                 "symbol": SYMBOL,
                 "parameter_count": len(parameters),
+                "metadata": "device int64 aclTensor (cu_seqlens/chunk_indices)",
                 "final_state_selector": "finalStateOutOptional != nullptr",
                 "legacy_layouts": ["BNSD", "NTD"],
                 "prepare_path_use_exp2": [False, True],

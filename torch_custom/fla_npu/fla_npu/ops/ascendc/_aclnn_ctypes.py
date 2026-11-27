@@ -3058,8 +3058,10 @@ def npu_chunk_gated_delta_rule_fwd(
             ctx.tensor(a_log, "a_log"),
             ctx.tensor(dt_bias, "dt_bias"),
             ctx.tensor(initial_state, "initial_state"),
-            ctx.int_array(cu_seqlens),
-            ctx.int_array(chunk_indices),
+            # cu_seqlens/chunk_indices are device tensors now (the Ascend950 kernels read
+            # them from GM), so they cross the aclnn boundary as int64 device tensors.
+            ctx.int_tensor(cu_seqlens, q.device),
+            ctx.int_tensor(chunk_indices, q.device),
             ctypes.cast(layout_buffer, ctypes.c_char_p),
             ctypes.c_double(scale),
             ctypes.c_int64(int(chunk_size)),

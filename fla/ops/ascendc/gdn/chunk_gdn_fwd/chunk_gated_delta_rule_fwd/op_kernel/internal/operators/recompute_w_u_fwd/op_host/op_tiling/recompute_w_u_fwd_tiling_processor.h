@@ -90,6 +90,10 @@ struct RecomputeWUFwdTilingContext {
     size_t sysWorkspaceSize;
     uint64_t aicCoreNum;
     bool enableA5CompactWorkspace;
+    // cu_seqlens/chunk_indices arrive as device tensors on the composite GDN path.
+    // Tiling then only validates their shapes and leaves the values to the kernel;
+    // callers that still pass host arrays keep the full value validation.
+    bool metadataOnDevice = false;
 };
 
 class RecomputeWUFwdTilingProcessor {
@@ -394,48 +398,59 @@ public:
                             "Check seqlens shape failed, the dim 0 of seqlens should be larger than 1, but get %ld.",
                             seqlensDim0),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(ctx_.cuSeqlensData == nullptr,
-                    OP_LOGE(ctx_.nodeName, "Input %s data is required, but got nullptr.", RECOMPUTE_W_U_FWD_INPUT_SEQLENS_NAME),
-                    return ge::GRAPH_FAILED);
-        const int64_t *cuSeqlens = ctx_.cuSeqlensData;
-        if (cuSeqlens[0] != 0) {
-            OP_LOGE(ctx_.nodeName, "Check seqlens data failed, the seqlens[0] should be 0, but get %ld.", cuSeqlens[0]);
-            return ge::GRAPH_FAILED;
-        }
-        std::vector<int64_t> expectChunkIndices;
-        for (int64_t i = 1; i < seqlensDim0; i++) {
-            int64_t curSeqLen = cuSeqlens[i] - cuSeqlens[i - 1];
-            OP_CHECK_IF(curSeqLen <= 0,
-                        OP_LOGE(ctx_.nodeName,
-                                "Check seqlens data failed, the seqlens[%ld]:[%ld] should be larger than seqlens[%ld]:[%ld]",
-                                i, cuSeqlens[i], i - 1, cuSeqlens[i - 1]),
-                        return ge::GRAPH_FAILED);
-            for (int64_t j = 0; j < curSeqLen; j += chunkSize) {
-                expectChunkIndices.push_back(i - 1);
-                expectChunkIndices.push_back(j / chunkSize);
-            }
-        }
-
         const gert::Shape chunkIndicesStorageShape = ctx_.chunkIndicesShape->GetStorageShape();
         int64_t chunkIndicesDim0 = chunkIndicesStorageShape.GetDim(RECOMPUTE_W_U_FWD_DIM_0);
-        OP_CHECK_IF(chunkIndicesDim0 != static_cast<int64_t>(expectChunkIndices.size()),
+        OP_CHECK_IF(chunkIndicesDim0 <= 0 || (chunkIndicesDim0 % 2) != 0,
                     OP_LOGE(ctx_.nodeName,
-                            "Check chunk_indices shape failed, the len of chunk_indices should be %zu, but get %ld.",
-                            expectChunkIndices.size(), chunkIndicesDim0),
+                            "Check chunk_indices shape failed, chunk_indices must hold (seq,chunk) pairs, but get %ld.",
+                            chunkIndicesDim0),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(ctx_.chunkIndicesData == nullptr,
-                    OP_LOGE(ctx_.nodeName, "Input %s data is required, but got nullptr.",
-                            RECOMPUTE_W_U_FWD_INPUT_CHUNK_INDICES_NAME),
-                    return ge::GRAPH_FAILED);
-        const int64_t *chunkIndices = ctx_.chunkIndicesData;
-        for (size_t i = 0; i < expectChunkIndices.size(); i++) {
-            OP_CHECK_IF(expectChunkIndices[i] != chunkIndices[i],
-                        OP_LOGE(ctx_.nodeName,
-                                "Check chunk_indices data failed, the chunk_indices[%zu] should be %ld, but get %ld.",
-                                i, expectChunkIndices[i], chunkIndices[i]),
+        // Device metadata: the composite GDN operator receives cu_seqlens/chunk_indices as
+        // device tensors, so the host tiling must never dereference the data pointers. The
+        // values still get validated whenever a caller hands over host arrays.
+        if (!ctx_.metadataOnDevice) {
+            OP_CHECK_IF(ctx_.cuSeqlensData == nullptr,
+                        OP_LOGE(ctx_.nodeName, "Input %s data is required, but got nullptr.",
+                                RECOMPUTE_W_U_FWD_INPUT_SEQLENS_NAME),
                         return ge::GRAPH_FAILED);
+            const int64_t *cuSeqlens = ctx_.cuSeqlensData;
+            if (cuSeqlens[0] != 0) {
+                OP_LOGE(ctx_.nodeName, "Check seqlens data failed, the seqlens[0] should be 0, but get %ld.",
+                        cuSeqlens[0]);
+                return ge::GRAPH_FAILED;
+            }
+            std::vector<int64_t> expectChunkIndices;
+            for (int64_t i = 1; i < seqlensDim0; i++) {
+                int64_t curSeqLen = cuSeqlens[i] - cuSeqlens[i - 1];
+                OP_CHECK_IF(curSeqLen <= 0,
+                            OP_LOGE(ctx_.nodeName,
+                                    "Check seqlens data failed, the seqlens[%ld]:[%ld] should be larger than seqlens[%ld]:[%ld]",
+                                    i, cuSeqlens[i], i - 1, cuSeqlens[i - 1]),
+                            return ge::GRAPH_FAILED);
+                for (int64_t j = 0; j < curSeqLen; j += chunkSize) {
+                    expectChunkIndices.push_back(i - 1);
+                    expectChunkIndices.push_back(j / chunkSize);
+                }
+            }
+            OP_CHECK_IF(chunkIndicesDim0 != static_cast<int64_t>(expectChunkIndices.size()),
+                        OP_LOGE(ctx_.nodeName,
+                                "Check chunk_indices shape failed, the len of chunk_indices should be %zu, but get %ld.",
+                                expectChunkIndices.size(), chunkIndicesDim0),
+                        return ge::GRAPH_FAILED);
+            OP_CHECK_IF(ctx_.chunkIndicesData == nullptr,
+                        OP_LOGE(ctx_.nodeName, "Input %s data is required, but got nullptr.",
+                                RECOMPUTE_W_U_FWD_INPUT_CHUNK_INDICES_NAME),
+                        return ge::GRAPH_FAILED);
+            const int64_t *chunkIndices = ctx_.chunkIndicesData;
+            for (size_t i = 0; i < expectChunkIndices.size(); i++) {
+                OP_CHECK_IF(expectChunkIndices[i] != chunkIndices[i],
+                            OP_LOGE(ctx_.nodeName,
+                                    "Check chunk_indices data failed, the chunk_indices[%zu] should be %ld, but get %ld.",
+                                    i, expectChunkIndices[i], chunkIndices[i]),
+                            return ge::GRAPH_FAILED);
+            }
         }
-        tiling_.chunkNum = chunkIndicesStorageShape.GetDim(RECOMPUTE_W_U_FWD_DIM_0) / 2;
+        tiling_.chunkNum = chunkIndicesDim0 / 2;
         return ge::GRAPH_SUCCESS;
     }
 

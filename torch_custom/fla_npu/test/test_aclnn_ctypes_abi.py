@@ -81,6 +81,14 @@ class FakeCallContext:
         self.descriptor_names.append("query_start_loc")
         return ctypes.c_void_p(0x2000)
 
+    def int_tensor(self, values, device):
+        # Device metadata: cu_seqlens/chunk_indices now cross the ABI as int64 tensors.
+        del device
+        if values is None:
+            return ctypes.c_void_p()
+        self.descriptor_names.append("cu_seqlens")
+        return ctypes.c_void_p(0x2001)
+
 
 class AclnnCtypesAbiTest(unittest.TestCase):
     def test_gdn_training_and_inference_output_contract(self):

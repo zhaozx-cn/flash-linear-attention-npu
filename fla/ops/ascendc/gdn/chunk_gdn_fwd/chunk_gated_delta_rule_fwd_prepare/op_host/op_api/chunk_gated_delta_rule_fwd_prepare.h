@@ -12,6 +12,38 @@
 
 namespace l0op {
 
+// Device metadata: the composite GDN forward keeps cu_seqlens/chunk_indices on device, so
+// the kernel input is the caller's tensor and nothing is converted.
+const std::array<const aclTensor *, 9> ChunkGatedDeltaRuleFwdPrepare(
+    const aclTensor *q,
+    const aclTensor *k,
+    const aclTensor *v,
+    const aclTensor *g,
+    const aclTensor *beta,
+    const aclTensor *aLogOptional,
+    const aclTensor *dtBiasOptional,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkIndicesOptional,
+    int64_t chunkSize,
+    bool allowNegEigval,
+    bool useExp2,
+    bool useQkL2norm,
+    bool useGateInKernel,
+    bool useBetaSigmoid,
+    bool outputA,
+    const aclTensor *gOut,
+    const aclTensor *wOut,
+    const aclTensor *uOut,
+    const aclTensor *aOut,
+    const aclTensor *qHatOptional,
+    const aclTensor *kHatOptional,
+    const aclTensor *qRstdOptional,
+    const aclTensor *kRstdOptional,
+    const aclTensor *betaEffOptional,
+    aclOpExecutor *executor);
+
+// Host metadata: the historical aclnn contract (aclIntArray) converts the host arrays into
+// the int64 tensor the kernel input expects.
 const std::array<const aclTensor *, 9> ChunkGatedDeltaRuleFwdPrepare(
     const aclTensor *q,
     const aclTensor *k,

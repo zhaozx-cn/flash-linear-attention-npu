@@ -272,11 +272,8 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdArch22StateOutput(gert::TilingConte
     const bool useInitialState = initialDesc != nullptr;
     const bool useGk = context->GetOptionalInputDesc(INPUT_GK) != nullptr;
 
-    auto cuSeqlensTensor = context->GetOptionalInputTensor(INPUT_CU_SEQLENS);
-    auto chunkIndicesTensor = context->GetOptionalInputTensor(INPUT_CHUNK_INDICES);
-    const int64_t *cuSeqlensData = cuSeqlensTensor == nullptr ? nullptr : cuSeqlensTensor->GetData<int64_t>();
-    const int64_t *chunkIndicesData =
-        chunkIndicesTensor == nullptr ? nullptr : chunkIndicesTensor->GetData<int64_t>();
+    // cu_seqlens/chunk_indices are device tensors on this path (no ValueDepend), so the
+    // values belong to the kernel. Host tiling only validates the shapes.
     GDN::GdnMegaArch22RecomputeWUTilingData recomputeTiling{};
     GdnArch22RecomputeWUFwdTilingContext recomputeContext{
         context->GetNodeName(),
@@ -287,8 +284,8 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdArch22StateOutput(gert::TilingConte
         context->GetRequiredInputShape(INPUT_G),
         context->GetOptionalInputShape(INPUT_CU_SEQLENS),
         context->GetOptionalInputShape(INPUT_CHUNK_INDICES),
-        cuSeqlensData,
-        chunkIndicesData,
+        /*cuSeqlensData=*/nullptr,
+        /*chunkIndicesData=*/nullptr,
         static_cast<int32_t>(chunkSize),
         kDesc->GetDataType(),
         betaDesc->GetDataType(),
@@ -296,6 +293,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdArch22StateOutput(gert::TilingConte
         sysWorkspaceSize,
     };
     recomputeContext.gIsBth = rawGLayout == 1;
+    recomputeContext.metadataOnDevice = isVarlen;
     platform_ascendc::PlatformAscendC ascendcPlatform(context->GetPlatformInfo());
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, recomputeContext.ubSize);
     GdnArch22RecomputeWUFwdTilingProcessor recomputeProcessor(recomputeContext, recomputeTiling);

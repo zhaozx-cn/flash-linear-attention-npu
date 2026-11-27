@@ -42,8 +42,8 @@ const std::array<const aclTensor *, 9> ChunkGatedDeltaRuleFwdPrepare(
     const aclTensor *beta,
     const aclTensor *aLogOptional,
     const aclTensor *dtBiasOptional,
-    const aclIntArray *cuSeqlensOptional,
-    const aclIntArray *chunkIndicesOptional,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkIndicesOptional,
     int64_t chunkSize,
     bool allowNegEigval,
     bool useExp2,
@@ -87,8 +87,8 @@ const std::array<const aclTensor *, 9> ChunkGatedDeltaRuleFwdPrepare(
            useBetaSigmoid, outputA, gOut, wOut, uOut, aOut, qHatOptional, kHatOptional, qRstdOptional,
            kRstdOptional, betaEffOptional);
 
-    const aclTensor *actualCuSeqlens = ConvertIntArrayToTensor(cuSeqlensOptional, executor);
-    const aclTensor *actualChunkIndices = ConvertIntArrayToTensor(chunkIndicesOptional, executor);
+    const aclTensor *actualCuSeqlens = cuSeqlensOptional;
+    const aclTensor *actualChunkIndices = chunkIndicesOptional;
     const aclTensor *actualQHat = qHatOptional;
     const aclTensor *actualKHat = kHatOptional;
     const aclTensor *actualQRstd = qRstdOptional;
@@ -129,6 +129,48 @@ const std::array<const aclTensor *, 9> ChunkGatedDeltaRuleFwdPrepare(
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     }
     return {gOut, wOut, uOut, aOut, qHatOptional, kHatOptional, qRstdOptional, kRstdOptional, actualBetaEff};
+}
+
+const std::array<const aclTensor *, 9> ChunkGatedDeltaRuleFwdPrepare(
+    const aclTensor *q,
+    const aclTensor *k,
+    const aclTensor *v,
+    const aclTensor *g,
+    const aclTensor *beta,
+    const aclTensor *aLogOptional,
+    const aclTensor *dtBiasOptional,
+    const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkIndicesOptional,
+    int64_t chunkSize,
+    bool allowNegEigval,
+    bool useExp2,
+    bool useQkL2norm,
+    bool useGateInKernel,
+    bool useBetaSigmoid,
+    bool outputA,
+    const aclTensor *gOut,
+    const aclTensor *wOut,
+    const aclTensor *uOut,
+    const aclTensor *aOut,
+    const aclTensor *qHatOptional,
+    const aclTensor *kHatOptional,
+    const aclTensor *qRstdOptional,
+    const aclTensor *kRstdOptional,
+    const aclTensor *betaEffOptional,
+    aclOpExecutor *executor)
+{
+    const aclTensor *cuSeqlens = ConvertIntArrayToTensor(cuSeqlensOptional, executor);
+    const aclTensor *chunkIndices = ConvertIntArrayToTensor(chunkIndicesOptional, executor);
+    if ((cuSeqlensOptional != nullptr && cuSeqlens == nullptr) ||
+        (chunkIndicesOptional != nullptr && chunkIndices == nullptr)) {
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Convert metadata to tensor failed.");
+        return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    }
+    return ChunkGatedDeltaRuleFwdPrepare(
+        q, k, v, g, beta, aLogOptional, dtBiasOptional, cuSeqlens, chunkIndices, chunkSize,
+        allowNegEigval, useExp2, useQkL2norm, useGateInKernel, useBetaSigmoid, outputA,
+        gOut, wOut, uOut, aOut, qHatOptional, kHatOptional, qRstdOptional, kRstdOptional,
+        betaEffOptional, executor);
 }
 
 } // namespace l0op

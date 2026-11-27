@@ -205,6 +205,15 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdArch35(gert::TilingContext *context
     const bool *outputFinalState =
         context->GetAttrs()->GetAttrPointer<bool>(ATTR_OUTPUT_FINAL_STATE);
     const int64_t *chunkSize = context->GetAttrs()->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE);
+    // cu_seqlens/chunk_indices are device tensors: only their shapes reach tiling, and both
+    // lengths size the workspace, so they must be static. Negative dims mean a dynamic
+    // length, which cannot be tiled here.
+    OP_CHECK_IF(isVarlen && (cuShape->GetStorageShape().GetDim(0) < 2 ||
+                             chunkShape->GetStorageShape().GetDim(0) < 2),
+                OP_LOGE(context->GetNodeName(),
+                        "Device cu_seqlens/chunk_indices require static lengths: the sequence count "
+                        "and the chunk count size the workspace."),
+                return ge::GRAPH_FAILED);
     uint64_t varlenChunks = 0;
     OP_CHECK_IF(outputFinalState == nullptr || chunkSize == nullptr ||
                     (*chunkSize != CHUNK_64 && *chunkSize != CHUNK_128) ||

@@ -51,8 +51,8 @@ struct ChunkGatedDeltaRuleFwdParams {
     const aclTensor *aLogOptional = nullptr;
     const aclTensor *dtBiasOptional = nullptr;
     const aclTensor *initialStateOptional = nullptr;
-    const aclIntArray *cuSeqlensOptional = nullptr;
-    const aclIntArray *chunkIndicesOptional = nullptr;
+    const aclTensor *cuSeqlensOptional = nullptr;
+    const aclTensor *chunkIndicesOptional = nullptr;
     const char *layout = nullptr;
     double scale = 1.0;
     int64_t chunkSize = CHUNK_GATED_DELTA_RULE_FWD_CHUNK_64;
@@ -223,26 +223,22 @@ static bool ShapeEqual(const op::Shape &lhs, const op::Shape &rhs)
     return true;
 }
 
+// cu_seqlens/chunk_indices are device tensors: the sequence count and the chunk count
+// come from their shapes, and the values are consumed by the kernel only.
 static int64_t SeqNum(const ChunkGatedDeltaRuleFwdParams &params, int64_t batch)
 {
     return params.cuSeqlensOptional == nullptr
                ? batch
-               : static_cast<int64_t>(params.cuSeqlensOptional->Size()) - 1;
+               : Dim(params.cuSeqlensOptional, 0) - 1;
 }
 
-static int64_t ExpectedChunks(const ChunkGatedDeltaRuleFwdParams &params, int64_t seqlen)
+static int64_t ChunkCount(const ChunkGatedDeltaRuleFwdParams &params, int64_t seqlen)
 {
-    if (params.cuSeqlensOptional == nullptr) {
+    if (params.chunkIndicesOptional == nullptr) {
         return (seqlen + params.chunkSize - 1) / params.chunkSize;
     }
-
-    int64_t total = 0;
-    const aclIntArray &cu = *params.cuSeqlensOptional;
-    for (size_t idx = 0; idx + 1 < cu.Size(); ++idx) {
-        const int64_t length = cu[idx + 1] - cu[idx];
-        total += (length + params.chunkSize - 1) / params.chunkSize;
-    }
-    return total;
+    const int64_t elements = Dim(params.chunkIndicesOptional, 0);
+    return elements > 0 ? elements / 2 : 0;
 }
 
 static aclnnStatus CheckStateShape(const aclTensor *state, const char *name, int64_t seqNum, int64_t hv,
@@ -258,37 +254,24 @@ static aclnnStatus CheckStateShape(const aclTensor *state, const char *name, int
     return ACLNN_SUCCESS;
 }
 
-static aclnnStatus CheckMetadata(const ChunkGatedDeltaRuleFwdParams &params, int64_t seqlen)
+static aclnnStatus CheckMetadata(const ChunkGatedDeltaRuleFwdParams &params)
 {
     if (params.cuSeqlensOptional == nullptr) {
         return ACLNN_SUCCESS;
     }
 
-    const aclIntArray &cu = *params.cuSeqlensOptional;
-    CHECK_COND(cu.Size() >= 2, ACLNN_ERR_PARAM_INVALID,
-               "cuSeqlens must contain at least [0,totalTokens].");
-    CHECK_COND(cu[0] == 0 && cu[cu.Size() - 1] == seqlen, ACLNN_ERR_PARAM_INVALID,
-               "cuSeqlens must start at 0 and end at T.");
-    for (size_t idx = 0; idx + 1 < cu.Size(); ++idx) {
-        CHECK_COND(cu[idx] <= cu[idx + 1], ACLNN_ERR_PARAM_INVALID,
-                   "cuSeqlens must be nondecreasing.");
-    }
-
-    const aclIntArray &indices = *params.chunkIndicesOptional;
-    const int64_t expectedChunks = ExpectedChunks(params, seqlen);
-    CHECK_COND(indices.Size() % 2 == 0 && static_cast<int64_t>(indices.Size() / 2) == expectedChunks,
+    CHECK_COND(Rank(params.cuSeqlensOptional) == 1 && Dim(params.cuSeqlensOptional, 0) >= 2,
+               ACLNN_ERR_PARAM_INVALID, "cuSeqlens must be a rank-1 [N+1] device tensor.");
+    CHECK_COND(params.cuSeqlensOptional->GetDataType() == DataType::DT_INT64 &&
+                   params.chunkIndicesOptional->GetDataType() == DataType::DT_INT64,
+               ACLNN_ERR_PARAM_INVALID, "cuSeqlens and chunkIndices must be int64 device tensors.");
+    CHECK_COND(Rank(params.chunkIndicesOptional) == 1 && Dim(params.chunkIndicesOptional, 0) > 0 &&
+                   Dim(params.chunkIndicesOptional, 0) % 2 == 0,
                ACLNN_ERR_PARAM_INVALID,
-               "chunkIndices must contain one (seqId,localChunkId) pair per chunk.");
-    size_t index = 0;
-    for (size_t seq = 0; seq + 1 < cu.Size(); ++seq) {
-        const int64_t seqChunks = (cu[seq + 1] - cu[seq] + params.chunkSize - 1) / params.chunkSize;
-        for (int64_t localChunk = 0; localChunk < seqChunks; ++localChunk) {
-            CHECK_COND(indices[index] == static_cast<int64_t>(seq) && indices[index + 1] == localChunk,
-                       ACLNN_ERR_PARAM_INVALID,
-                       "chunkIndices must use canonical sequence-major order.");
-            index += 2;
-        }
-    }
+               "chunkIndices must be a rank-1 device tensor of (seqId,localChunkId) pairs.");
+    // The values are device data now: the kernel consumes them, so the caller owns the
+    // canonical contract (cuSeqlens[0]==0, nondecreasing, cuSeqlens[-1]==T, and
+    // chunkIndices in sequence-major order). They can no longer be checked on the host.
     return ACLNN_SUCCESS;
 }
 
@@ -476,7 +459,7 @@ static aclnnStatus CheckParams(const ChunkGatedDeltaRuleFwdParams &params)
     CHECK_RET(CheckOptionalRank(params.hOutOptional, 5, "hOutOptional") == ACLNN_SUCCESS,
               ACLNN_ERR_PARAM_INVALID);
 
-    const int64_t chunks = ExpectedChunks(params, info.seqlen);
+    const int64_t chunks = ChunkCount(params, info.seqlen);
     CHECK_COND(info.batch > 0 && info.hq > 0 && info.hv > 0 && info.seqlen > 0,
                ACLNN_ERR_PARAM_INVALID, "B/H/T dimensions must be positive.");
     CHECK_COND(info.hv % info.hq == 0, ACLNN_ERR_PARAM_INVALID,
@@ -533,7 +516,7 @@ static aclnnStatus CheckParams(const ChunkGatedDeltaRuleFwdParams &params)
                ACLNN_ERR_PARAM_INVALID, "cuSeqlens and chunkIndices must be both present or both absent.");
     CHECK_COND(params.cuSeqlensOptional == nullptr || info.batch == 1, ACLNN_ERR_PARAM_INVALID,
                "varlen rank-4 input requires physical B=1.");
-    CHECK_RET(CheckMetadata(params, info.seqlen) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(CheckMetadata(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
     const int64_t seqNum = SeqNum(params, info.batch);
     const int64_t stateDim0 = params.stateVFirst ? info.vDim : info.kDim;
@@ -604,8 +587,8 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
     const aclTensor *aLogOptional,
     const aclTensor *dtBiasOptional,
     const aclTensor *initialStateOptional,
-    const aclIntArray *cuSeqlensOptional,
-    const aclIntArray *chunkIndicesOptional,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkIndicesOptional,
     const char *layout,
     double scale,
     int64_t chunkSize,
@@ -690,7 +673,7 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         const op::Shape aShape = MakeShape({batch, hv, seqlen, params.chunkSize});
         const int64_t stateDim0 = params.stateVFirst ? vDim : kDim;
         const int64_t stateDim1 = params.stateVFirst ? kDim : vDim;
-        const op::Shape hShape = MakeShape({batch, ExpectedChunks(params, seqlen), hv, stateDim0, stateDim1});
+        const op::Shape hShape = MakeShape({batch, ChunkCount(params, seqlen), hv, stateDim0, stateDim1});
         const op::Shape stateShape = MakeShape({seqNum, hv, stateDim0, stateDim1});
         const DataType dtype = params.q->GetDataType();
         const DataType stateDtype = params.initialStateOptional == nullptr
@@ -888,8 +871,8 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdGetWorkspaceSize(
     const aclTensor *aLogOptional,
     const aclTensor *dtBiasOptional,
     const aclTensor *initialStateOptional,
-    const aclIntArray *cuSeqlensOptional,
-    const aclIntArray *chunkIndicesOptional,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkIndicesOptional,
     const char *layout,
     double scale,
     int64_t chunkSize,

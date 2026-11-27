@@ -683,6 +683,70 @@ def npu_recurrent_kda(
 # ---------------------------------------------------------------------------
 # Generic plumbing for the generated wrappers.
 # ---------------------------------------------------------------------------
+def _check_gdn_metadata(cu_seqlens, chunk_indices, q, layout, chunk_size):
+    """Validate list/tuple metadata before it becomes a device tensor.
+
+    The Ascend950 kernel consumes ``cu_seqlens``/``chunk_indices`` on device, so
+    aclnn can no longer check their values; doing it here keeps the error the
+    caller always received. Tensors are forwarded unchecked -- their values are
+    device data.
+    """
+
+    token_axis = 1 if layout in ("BSND", "TND") else 2
+    tokens = int(q.shape[token_axis])
+    cu = None
+    if isinstance(cu_seqlens, (list, tuple)):
+        cu = [int(value) for value in cu_seqlens]
+        if len(cu) < 2 or cu[0] != 0 or cu[-1] != tokens:
+            raise RuntimeError(
+                "npu_chunk_gated_delta_rule_fwd: cu_seqlens must start at 0 "
+                f"and end at T={tokens}.")
+        if any(left > right for left, right in zip(cu, cu[1:])):
+            raise RuntimeError(
+                "npu_chunk_gated_delta_rule_fwd: cu_seqlens must be "
+                "nondecreasing.")
+    if isinstance(chunk_indices, (list, tuple)):
+        indices = [int(value) for value in chunk_indices]
+        if not indices or len(indices) % 2 != 0:
+            raise RuntimeError(
+                "npu_chunk_gated_delta_rule_fwd: chunk_indices must hold one "
+                "(seqId,localChunkId) pair per chunk.")
+        if cu is not None and int(chunk_size) > 0:
+            expected = []
+            for seq, (begin, end) in enumerate(zip(cu, cu[1:])):
+                for local in range((end - begin + int(chunk_size) - 1) // int(chunk_size)):
+                    expected.extend((seq, local))
+            if tuple(expected) != tuple(indices):
+                raise RuntimeError(
+                    "npu_chunk_gated_delta_rule_fwd: chunk_indices must use "
+                    "canonical sequence-major order.")
+
+
+def _device_ints(values, reference):
+    """Metadata ``int[]`` arguments travel as int64 device tensors.
+
+    The Ascend950 GDN kernels read ``cu_seqlens``/``chunk_indices`` straight from
+    GM, so the stable adapter no longer copies their values to the host: the
+    schema already declares them as optional tensors, and a list/tuple (the
+    reference API spelling) is materialized on ``reference``'s device instead of
+    on the CPU. An existing tensor is forwarded after dtype/device normalization.
+    """
+
+    if values is None:
+        return None
+    import torch
+
+    device = reference.device if hasattr(reference, "device") else None
+    if isinstance(values, torch.Tensor):
+        target = values
+        if target.dtype != torch.int64:
+            target = target.to(torch.int64)
+        if device is not None and target.device != device:
+            target = target.to(device)
+        return target.contiguous()
+    return torch.tensor(list(values), dtype=torch.int64, device=device)
+
+
 def _host_ints(values):
     """int[] arguments travel as host int64 tensors (no list support in the
     stable conversions).
@@ -1519,9 +1583,11 @@ def npu_chunk_gated_delta_rule_fwd(q, k, v, g, beta, *, initial_state=None,
             "while gate-in-kernel is unsupported.")
     if scale is None:
         scale = float(k.shape[-1]) ** -0.5
+    if isinstance(cu_seqlens, (list, tuple)) or isinstance(chunk_indices, (list, tuple)):
+        _check_gdn_metadata(cu_seqlens, chunk_indices, q, layout, chunk_size)
     return _op("npu_chunk_gated_delta_rule_fwd")(
         q, k, v, g, beta, initial_state,
-        _host_ints(cu_seqlens), _host_ints(chunk_indices),
+        _device_ints(cu_seqlens, q), _device_ints(chunk_indices, q),
         _char_code("npu_chunk_gated_delta_rule_fwd", "layout", layout),
         float(scale), chunk_size, bool(use_exp2),
         bool(use_qk_l2norm_in_kernel),

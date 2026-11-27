@@ -101,6 +101,40 @@ inline int64_t chunks(const std::vector<int64_t>& cu_seqlens,
   return (tokens + chunk_size - 1) / chunk_size;
 }
 
+// Value-free variants for device metadata.  An adapter that receives `cu_seqlens` /
+// `chunk_indices` as device tensors cannot read them on the host, but the element counts
+// are exactly the counts the kernel derives from the values: `cu_seqlens` holds one
+// boundary per sequence plus the terminator, and `chunk_indices` holds one (seq, chunk)
+// pair per chunk.  Dense inputs still fall back to the batch / token arithmetic.
+inline int64_t sequences_of(
+    const std::optional<torch::stable::Tensor>& cu_seqlens,
+    int64_t batch_size) {
+  if (!cu_seqlens.has_value()) {
+    return batch_size;
+  }
+  const TensorMeta meta = meta_of(*cu_seqlens);
+  if (!meta.defined || meta.sizes.empty() || meta.sizes[0] < 2) {
+    return batch_size;
+  }
+  return meta.sizes[0] - 1;
+}
+
+inline int64_t chunks_of(
+    const std::optional<torch::stable::Tensor>& chunk_indices,
+    int64_t chunk_size, int64_t tokens) {
+  const int64_t dense_chunks =
+      chunk_size > 0 ? (tokens + chunk_size - 1) / chunk_size : 0;
+  if (!chunk_indices.has_value()) {
+    return dense_chunks;
+  }
+  const TensorMeta meta = meta_of(*chunk_indices);
+  if (!meta.defined || meta.sizes.empty()) {
+    return dense_chunks;
+  }
+  // [2 * Nc] (the kernel's spelling) or [Nc, 2].
+  return meta.sizes.size() == 1 ? meta.sizes[0] / 2 : meta.sizes[0];
+}
+
 }  // namespace layout_math
 }  // namespace stable
 }  // namespace fla_npu_stable

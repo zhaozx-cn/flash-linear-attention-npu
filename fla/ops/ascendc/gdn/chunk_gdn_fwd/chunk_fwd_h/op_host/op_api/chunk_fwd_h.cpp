@@ -31,6 +31,23 @@ op::Shape MakeShape(std::initializer_list<int64_t> dims)
     return shape;
 }
 
+// Host metadata (aclIntArray) is materialized as the int64 tensor the kernel input expects.
+const aclTensor *ConvertMetadata(const aclIntArray *values, aclOpExecutor *executor)
+{
+    if (values == nullptr) {
+        return nullptr;
+    }
+    const aclTensor *tensor = executor->ConvertToTensor(values, DataType::DT_INT64);
+    if (tensor == nullptr) {
+        return nullptr;
+    }
+    auto *mutableTensor = const_cast<aclTensor *>(tensor);
+    mutableTensor->SetStorageFormat(Format::FORMAT_ND);
+    mutableTensor->SetViewFormat(Format::FORMAT_ND);
+    mutableTensor->SetOriginalFormat(Format::FORMAT_ND);
+    return tensor;
+}
+
 } // namespace
 
 const std::array<const aclTensor *, 3> ChunkFwdH(
@@ -40,8 +57,8 @@ const std::array<const aclTensor *, 3> ChunkFwdH(
     const aclTensor *g,
     const aclTensor *gkOptional,
     const aclTensor *initialStateOptional,
-    const aclIntArray *cuSeqlensOptional,
-    const aclIntArray *chunkIndicesOptional,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkIndicesOptional,
     bool outputFinalState,
     int64_t chunkSize,
     bool saveNewValue,
@@ -55,34 +72,6 @@ const std::array<const aclTensor *, 3> ChunkFwdH(
     L0_DFX(ChunkFwdH, k, w, u, g, gkOptional, initialStateOptional, cuSeqlensOptional,
            chunkIndicesOptional, outputFinalState, chunkSize, saveNewValue, useExp2, stateVFirst,
            hOut, vNewOut, finalStateOut);
-
-    const aclTensor *actualCuSeqlens = nullptr;
-    if (cuSeqlensOptional) {
-        actualCuSeqlens = executor->ConvertToTensor(cuSeqlensOptional, DataType::DT_INT64);
-        if (actualCuSeqlens == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Convert cuSeqlens to tensor failed.");
-            return {nullptr, nullptr, nullptr};
-        }
-        const_cast<aclTensor *>(actualCuSeqlens)->SetStorageFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualCuSeqlens)->SetViewFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualCuSeqlens)->SetOriginalFormat(Format::FORMAT_ND);
-    } else {
-        actualCuSeqlens = nullptr;
-    }
-
-    const aclTensor *actualChunkIndices = nullptr;
-    if (chunkIndicesOptional) {
-        actualChunkIndices = executor->ConvertToTensor(chunkIndicesOptional, DataType::DT_INT64);
-        if (actualChunkIndices == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Convert chunkIndices to tensor failed.");
-            return {nullptr, nullptr, nullptr};
-        }
-        const_cast<aclTensor *>(actualChunkIndices)->SetStorageFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualChunkIndices)->SetViewFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualChunkIndices)->SetOriginalFormat(Format::FORMAT_ND);
-    } else {
-        actualChunkIndices = nullptr;
-    }
 
     const auto &kShape = k->GetViewShape();
     const auto &uShape = u->GetViewShape();
@@ -104,7 +93,7 @@ const std::array<const aclTensor *, 3> ChunkFwdH(
         }
     }
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkFwdH,
-        OP_INPUT(k, w, u, g, gkOptional, initialStateOptional, actualCuSeqlens, actualChunkIndices),
+        OP_INPUT(k, w, u, g, gkOptional, initialStateOptional, cuSeqlensOptional, chunkIndicesOptional),
         OP_OUTPUT(hOut, vNewOut, finalStateOutKernel),
         OP_ATTR(outputFinalState, chunkSize, saveNewValue, useExp2, stateVFirst,
                 logicalBatch, logicalSeqlen,
@@ -114,6 +103,37 @@ const std::array<const aclTensor *, 3> ChunkFwdH(
         return {nullptr, nullptr, nullptr};
     }
     return {hOut, vNewOut, finalStateOut};
+}
+
+const std::array<const aclTensor *, 3> ChunkFwdH(
+    const aclTensor *k,
+    const aclTensor *w,
+    const aclTensor *u,
+    const aclTensor *g,
+    const aclTensor *gkOptional,
+    const aclTensor *initialStateOptional,
+    const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkIndicesOptional,
+    bool outputFinalState,
+    int64_t chunkSize,
+    bool saveNewValue,
+    bool useExp2,
+    bool stateVFirst,
+    const aclTensor *hOut,
+    const aclTensor *vNewOut,
+    const aclTensor *finalStateOut,
+    aclOpExecutor *executor)
+{
+    const aclTensor *cuSeqlens = ConvertMetadata(cuSeqlensOptional, executor);
+    const aclTensor *chunkIndices = ConvertMetadata(chunkIndicesOptional, executor);
+    if ((cuSeqlensOptional != nullptr && cuSeqlens == nullptr) ||
+        (chunkIndicesOptional != nullptr && chunkIndices == nullptr)) {
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Convert metadata to tensor failed.");
+        return {nullptr, nullptr, nullptr};
+    }
+    return ChunkFwdH(k, w, u, g, gkOptional, initialStateOptional, cuSeqlens, chunkIndices,
+                     outputFinalState, chunkSize, saveNewValue, useExp2, stateVFirst,
+                     hOut, vNewOut, finalStateOut, executor);
 }
 
 } // namespace l0op

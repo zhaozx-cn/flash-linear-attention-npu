@@ -37,9 +37,11 @@ public:
             .UnknownShapeFormat(formats).AutoContiguous();
         this->Input("initial_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats)
             .UnknownShapeFormat(formats).AutoContiguous();
-        this->Input("cu_seqlens").ParamType(OPTIONAL).ValueDepend(OPTIONAL).DataType(indexTypes)
+        // cu_seqlens/chunk_indices are device tensors: the kernel consumes the values
+        // directly and host tiling only needs their shapes.
+        this->Input("cu_seqlens").ParamType(OPTIONAL).DataType(indexTypes)
             .Format(formats).UnknownShapeFormat(formats).AutoContiguous();
-        this->Input("chunk_indices").ParamType(OPTIONAL).ValueDepend(OPTIONAL).DataType(indexTypes)
+        this->Input("chunk_indices").ParamType(OPTIONAL).DataType(indexTypes)
             .Format(formats).UnknownShapeFormat(formats).AutoContiguous();
 
         this->Output("o").ParamType(REQUIRED).DataType(inputTypes).Format(formats)

@@ -13,6 +13,26 @@
 #include "opdev/op_executor.h"
 
 namespace l0op {
+// Device metadata: the composite GDN forward keeps cu_seqlens/chunk_indices on device, so
+// the kernel input is the caller's tensor and nothing is converted.
+const std::array<const aclTensor *, 1> ChunkFwdO(
+    const aclTensor *q,
+    const aclTensor *k,
+    const aclTensor *v,
+    const aclTensor *h,
+    const aclTensor *g,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkOffsetsOptional,
+    double scale,
+    int64_t chunkSize,
+    bool useExp2,
+    bool stateVFirst,
+    const char *outputLayout,
+    const aclTensor *oOut,
+    aclOpExecutor *executor);
+
+// Host metadata: the historical aclnn contract (aclIntArray) converts the host arrays into
+// the int64 tensor the kernel input expects.
 const std::array<const aclTensor *, 1> ChunkFwdO(
     const aclTensor *q,
     const aclTensor *k,

@@ -19,6 +19,58 @@ using namespace op;
 namespace l0op {
 OP_TYPE_REGISTER(ChunkFwdO);
 
+namespace {
+
+// Host metadata (aclIntArray) is materialized as the int64 tensor the kernel input expects.
+const aclTensor *ConvertMetadata(const aclIntArray *values, aclOpExecutor *executor)
+{
+    if (values == nullptr) {
+        return nullptr;
+    }
+    const aclTensor *tensor = executor->ConvertToTensor(values, DataType::DT_INT64);
+    if (tensor == nullptr) {
+        return nullptr;
+    }
+    auto *mutableTensor = const_cast<aclTensor *>(tensor);
+    mutableTensor->SetStorageFormat(Format::FORMAT_ND);
+    mutableTensor->SetViewFormat(Format::FORMAT_ND);
+    mutableTensor->SetOriginalFormat(Format::FORMAT_ND);
+    return tensor;
+}
+
+} // namespace
+
+const std::array<const aclTensor *, 1> ChunkFwdO(
+    const aclTensor *q,
+    const aclTensor *k,
+    const aclTensor *v,
+    const aclTensor *h,
+    const aclTensor *g,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkOffsetsOptional,
+    double scale,
+    int64_t chunkSize,
+    bool useExp2,
+    bool stateVFirst,
+    const char *outputLayout,
+    const aclTensor *oOut,
+    aclOpExecutor *executor)
+{
+    L0_DFX(ChunkFwdO, q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional, scale, chunkSize, useExp2, stateVFirst,
+           outputLayout, oOut);
+
+    std::string outputLayoutStr(outputLayout == nullptr ? "BNSD" : outputLayout);
+    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkFwdO,
+        OP_INPUT(q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional),
+        OP_OUTPUT(oOut),
+        OP_ATTR(scale, chunkSize, useExp2, stateVFirst, outputLayoutStr));
+    if (ret != ACLNN_SUCCESS) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        return {nullptr};
+    }
+    return {oOut};
+}
+
 const std::array<const aclTensor *, 1> ChunkFwdO(
     const aclTensor *q,
     const aclTensor *k,
@@ -35,39 +87,15 @@ const std::array<const aclTensor *, 1> ChunkFwdO(
     const aclTensor *oOut,
     aclOpExecutor *executor)
 {
-    L0_DFX(ChunkFwdO, q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional, scale, chunkSize, useExp2, stateVFirst,
-           outputLayout, oOut);
-
-    const aclTensor *actualCuSeqlens = nullptr;
-    if (cuSeqlensOptional) {
-        actualCuSeqlens = executor->ConvertToTensor(cuSeqlensOptional, DataType::DT_INT64);
-        const_cast<aclTensor *>(actualCuSeqlens)->SetStorageFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualCuSeqlens)->SetViewFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualCuSeqlens)->SetOriginalFormat(Format::FORMAT_ND);
-    } else {
-        actualCuSeqlens = nullptr;
-    }
-
-    const aclTensor *actualChunkOffsets = nullptr;
-    if (chunkOffsetsOptional) {
-        actualChunkOffsets = executor->ConvertToTensor(chunkOffsetsOptional, DataType::DT_INT64);
-        const_cast<aclTensor *>(actualChunkOffsets)->SetStorageFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualChunkOffsets)->SetViewFormat(Format::FORMAT_ND);
-        const_cast<aclTensor *>(actualChunkOffsets)->SetOriginalFormat(Format::FORMAT_ND);
-    } else {
-        actualChunkOffsets = nullptr;
-    }
-
-    std::string outputLayoutStr(outputLayout == nullptr ? "BNSD" : outputLayout);
-    auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkFwdO,
-        OP_INPUT(q, k, v, h, g, actualCuSeqlens, actualChunkOffsets),
-        OP_OUTPUT(oOut),
-        OP_ATTR(scale, chunkSize, useExp2, stateVFirst, outputLayoutStr));
-    if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
+    const aclTensor *cuSeqlens = ConvertMetadata(cuSeqlensOptional, executor);
+    const aclTensor *chunkOffsets = ConvertMetadata(chunkOffsetsOptional, executor);
+    if ((cuSeqlensOptional != nullptr && cuSeqlens == nullptr) ||
+        (chunkOffsetsOptional != nullptr && chunkOffsets == nullptr)) {
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Convert metadata to tensor failed.");
         return {nullptr};
     }
-    return {oOut};
+    return ChunkFwdO(q, k, v, h, g, cuSeqlens, chunkOffsets, scale, chunkSize, useExp2, stateVFirst,
+                     outputLayout, oOut, executor);
 }
 
 } // namespace l0op

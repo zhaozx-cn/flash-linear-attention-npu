@@ -14,25 +14,6 @@ namespace l0op {
 
 OP_TYPE_REGISTER(ChunkGatedDeltaRuleFwd);
 
-namespace {
-
-const aclTensor *ConvertMetadata(const aclIntArray *values, aclOpExecutor *executor)
-{
-    if (values == nullptr) {
-        return nullptr;
-    }
-    const aclTensor *tensor = executor->ConvertToTensor(values, DataType::DT_INT64);
-    if (tensor != nullptr) {
-        auto *mutableTensor = const_cast<aclTensor *>(tensor);
-        mutableTensor->SetStorageFormat(Format::FORMAT_ND);
-        mutableTensor->SetViewFormat(Format::FORMAT_ND);
-        mutableTensor->SetOriginalFormat(Format::FORMAT_ND);
-    }
-    return tensor;
-}
-
-} // namespace
-
 const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     const aclTensor *q,
     const aclTensor *k,
@@ -42,8 +23,8 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     const aclTensor *rawG,
     const aclTensor *gkOptional,
     const aclTensor *initialStateOptional,
-    const aclIntArray *cuSeqlensOptional,
-    const aclIntArray *chunkIndicesOptional,
+    const aclTensor *cuSeqlensOptional,
+    const aclTensor *chunkIndicesOptional,
     bool outputFinalState,
     int64_t chunkSize,
     double scale,
@@ -60,18 +41,11 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     L0_DFX(ChunkGatedDeltaRuleFwd, q, k, v, beta, aStorage, rawG, gkOptional, initialStateOptional,
            cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, scale, outputGCumsum,
            oOut, finalStateOut, gCumsumBthOut, aOut, rawGLayout, qkvLayout, oLayout);
-    const aclTensor *cuSeqlens = ConvertMetadata(cuSeqlensOptional, executor);
-    const aclTensor *chunkIndices = ConvertMetadata(chunkIndicesOptional, executor);
-    if ((cuSeqlensOptional != nullptr && cuSeqlens == nullptr) ||
-        (chunkIndicesOptional != nullptr && chunkIndices == nullptr)) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Convert Phase 6 metadata failed.");
-        return {nullptr, nullptr, nullptr, nullptr};
-    }
 
     const aclError ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkGatedDeltaRuleFwd,
         OP_INPUT(q, k, v, beta, aStorage, rawG, gkOptional, initialStateOptional,
-                 cuSeqlens, chunkIndices),
+                 cuSeqlensOptional, chunkIndicesOptional),
         OP_OUTPUT(oOut, finalStateOut, gCumsumBthOut, aOut),
         OP_ATTR(outputFinalState, chunkSize, scale, outputGCumsum, rawGLayout, qkvLayout, oLayout));
     if (ret != ACLNN_SUCCESS) {

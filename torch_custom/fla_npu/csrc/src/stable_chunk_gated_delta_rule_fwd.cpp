@@ -26,9 +26,6 @@ using fla_npu_stable::stable::at_shim::kFloat;
 using fla_npu_stable::stable::allocate_like;
 using fla_npu_stable::stable::allocate_sizes;
 using fla_npu_stable::stable::cstr;
-using fla_npu_stable::stable::enum_name;
-using fla_npu_stable::stable::int_array;
-using fla_npu_stable::stable::int_values;
 using fla_npu_stable::stable::meta_of;
 using fla_npu_stable::stable::logical_optional_tensor;
 using fla_npu_stable::stable::logical_out_tensor;
@@ -83,8 +80,6 @@ run_npu_chunk_gated_delta_rule_fwd(
   const TensorMeta q_meta = meta_of(q);
   const TensorMeta k_meta = meta_of(k);
   const TensorMeta v_meta = meta_of(v);
-  const std::vector<int64_t> cu = int_values(cu_seqlens);
-  const std::vector<int64_t> ci = int_values(chunk_indices);
   // This operator accepts the TND/NTD *names* but always reads a rank-4
   // tensor: for TND the token axis is dim 1 and the heads are dim 2, exactly
   // like BSND.  Using the packed (rank-3) helpers here produced o/A/g_cumsum/
@@ -112,7 +107,8 @@ run_npu_chunk_gated_delta_rule_fwd(
                                     ? meta_of(*initial_state).scalar_type
                                     : kFloat;
     out_final_state = allocate_sizes(
-        {layout_math::sequences(cu, batch), heads, state_tail_k, state_tail_v},
+        {layout_math::sequences_of(cu_seqlens, batch), heads, state_tail_k,
+         state_tail_v},
         state_dtype, q_meta);
   }
   std::optional<Tensor> out_beta_eff;
@@ -130,7 +126,7 @@ run_npu_chunk_gated_delta_rule_fwd(
   std::optional<Tensor> out_h;
   if (return_intermediate_states) {
     const std::vector<int64_t> h_shape = {
-        batch, layout_math::chunks(cu, ci, chunk_size, tokens), heads,
+        batch, layout_math::chunks_of(chunk_indices, chunk_size, tokens), heads,
         state_tail_k, state_tail_v};
     out_h = allocate_sizes(h_shape, q_meta.scalar_type, q_meta);
   }
@@ -159,8 +155,9 @@ run_npu_chunk_gated_delta_rule_fwd(
       tensor(meta_of(beta)),
       /*a_log=*/optional_tensor(std::nullopt),
       /*dt_bias=*/optional_tensor(std::nullopt),
-      optional_tensor(initial_state), int_array(cu), int_array(ci),
-      cstr(kGdnFwdLayoutNames, layout), scalar(scale), scalar(chunk_size),
+      optional_tensor(initial_state), optional_tensor(cu_seqlens),
+      optional_tensor(chunk_indices), cstr(kGdnFwdLayoutNames, layout),
+      scalar(scale), scalar(chunk_size),
       scalar(use_exp2), scalar(use_qk_l2norm_in_kernel),
       scalar(allow_neg_eigval), scalar(state_v_first),
       out_tensor(meta_of(out_o)),

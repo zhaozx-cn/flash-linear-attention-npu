@@ -37,12 +37,15 @@ A5 依次调度 `ChunkGatedDeltaRuleFwdPrepare`、`ChunkFwdH` 和 `ChunkFwdO`，
 | `aLogOptional` | 当前未支持 | - | 扩展接口预留，必须为空 |
 | `dtBiasOptional` | 当前未支持 | - | 扩展接口预留，必须为空 |
 | `initialStateOptional` | 可选 | `stateVFirst=false` 时为 `[N,Hv,K,V]`，否则为 `[N,Hv,V,K]`；FP32 或与 q 同 dtype | 初始状态 |
-| `cuSeqlensOptional` | 可选 | `[N+1]`；INT64 | 变长序列累计长度，需与 `chunkIndicesOptional` 同时提供 |
-| `chunkIndicesOptional` | 可选 | `[2*Nc]`；INT64 | canonical sequence-major chunk 索引 |
+| `cuSeqlensOptional` | 可选 | `[N+1]`；INT64；device 张量 | 变长序列累计长度，需与 `chunkIndicesOptional` 同时提供；长度须静态（`N` 参与 workspace 计算） |
+| `chunkIndicesOptional` | 可选 | `[2*Nc]`；INT64；device 张量 | canonical sequence-major chunk 索引；长度须静态（`Nc` 决定任务数/workspace） |
 
 四种 QKV 布局均使用四维输入：`BNSD/NTD=[B,H,T,D]`，
-`BSND/TND=[B,T,H,D]`。`Hv` 必须能被 `Hk` 整除。变长模式使用物理 `B=1`，`cuSeqlensOptional` 必须从 0 开始、
-以 `T` 结束且单调不降。
+`BSND/TND=[B,T,H,D]`。`Hv` 必须能被 `Hk` 整除。变长模式使用物理 `B=1`。
+
+`cuSeqlensOptional`/`chunkIndicesOptional` 是 device 张量：host tiling 只读 shape，值只由 kernel 在 device 上消费，
+因此下列契约由调用方保证，host 侧不再校验：`cuSeqlensOptional` 首项为 0、单调不降、末项等于 `T`；
+`chunkIndicesOptional` 按 canonical sequence-major 顺序排列，且其长度等于各序列 `ceil(len/chunkSize)` 之和。
 
 ## 输出
 
