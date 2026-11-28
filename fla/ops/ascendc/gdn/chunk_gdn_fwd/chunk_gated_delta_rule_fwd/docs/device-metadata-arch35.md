@@ -422,3 +422,55 @@ prepare 分支（BF16、K=V=128、chunk=64、Hv/Hk≤4），这是默认模型 c
 - `python tools/op_abi_parity.py`、`python tools/op_abi_validate.py`；
 - A2/A3 回归（arch22 tiling 已同步去值化）。
 
+## 8. 图捕获所需的容量化（padded）元数据：待实现的算子部分
+
+把 GDN 的 prefill extend 放进 breakable 图（sglang `--cuda-graph-backend-prefill breakable`）时，
+图里张量的 shape/地址在 capture 时固定，而 chunk 数 `Nc = Σ ceil(len_i/64)` 是数据相关的，
+因此 sglang 侧改为**按 token bucket 分配容量化静态表**（`max_seqs`、`max_chunks =
+cdiv(bucket,64) + max_seqs`），replay 前原地刷新：
+
+- `cu_seqlens[max_seqs+1]`：真实边界在前，剩余槽位是空序列（`cu` 尾部重复 `total`）；
+- `chunk_indices[2*max_chunks]`：真实行在前，尾部行指向"越过序列末尾"的 chunk（`valid <= 0`）；
+- 因此 tiling 看到的 `NT` 是**容量**，而不是真实 chunk 数。
+
+当前实现状态（逐阶段核对，**已实现**）：
+
+| 阶段 | 容量表处理 | 说明 |
+| --- | --- | --- |
+| 融合算子：系数生成 / cumsum / solve / recompute | ✅ 钳制 task 空间 | `chunk_gated_delta_rule_fwd_arch35.cpp` 在 `RunPhase6` 里用 `BuildHoPipelineContext` 的 `cu` 扫描得到 `activeChunks = Σ ceil(len/64)`，把本地 `coefficient` 的 `NT/taskNum/totalTiles/tilesPerCore/totalChunks` 与 `recomputeTiling.chunkNum` 收到 `activeChunks`；pad 行不参与，精确表时是 no-op |
+| 融合算子：FwdH / FwdO（内部 kernel） | ✅ 本来即由 `cu` 驱动 | `block_scheduler_gdn_fwd_h/o.hpp` 自行扫描 `cu` 生成任务 |
+| `WritePublicCumsumRows` | ✅ | 用钳制后的 coefficient 迭代，另有 `valid <= 0` 保护 |
+| 独立算子 `ChunkGatedDeltaRuleFwdPrepare` | ✅ 钳制 `totalChunks` | `PrepareState::ClampTotalChunksToMetadata()`（`gmCu` 绑定后调用），把 `totalChunkTileCount` 收到真实 `chunks * HV` |
+| 独立算子 `ChunkFwdH` | ✅ 本来即由 `cu` 驱动 | `chunk_fwd_h_utils.h:24-59` 按 `cu` 逐序列算 `chunkCount/totalChunks`，空序列为 0 |
+| 独立算子 `ChunkFwdO`（A5 `chunk_fwd_o_a5.h`） | ✅ 钳制 `tiling_.chunkNum` | `Init` 里按 `cu` 扫描后收小 `chunkNum`；非 A5 分支走 `GDNFwdOKernel`（本即由 `cu` 驱动） |
+
+实现要点：
+
+1. `h`/`final_state` 形状仍按容量解释（`chunk_indices`/`cu` 长度），尾部行不写、调用方忽略；
+2. HO pipeline 不需要关闭：钳制后实际执行的 task 集与"精确表"完全一致，而 HO 的计数本来就由 `cu` 推导；
+3. 没有新增算子属性/ABI：钳制只可能"收小"任务空间，精确表下 `activeChunks == NT`，行为逐位不变；
+4. `GDN_PADDED_METADATA_SUPPORTED` 已置 `True`，sglang 侧因此可以打开捕获。
+
+**仍待 NPU 验证**（本机无 CANN/NPU，未编译）：
+
+- 编译：`op_kernel`（arch35）+ `op_host`（未改动）全量构建；
+- 精度：同一批输入分别用"精确长度表"和"容量表 + pad 行"运行，融合路径与 prepare/H/O 复合路径都要逐位一致；
+- 回归：varlen 精确表（现有 ATK 用例）逐位不变；dense 路径不变；A2/A3（arch22）未改动。
+
+
+调用方（sglang `D:\zzx\job\compare\sglang`）已经落地的部分：
+
+- `python/sglang/srt/hardware_backend/npu/attention/gdn_prefill_graph.py`：
+  `GDNPrefillGraphMetadata`（容量化 `cu_seqlens`/`chunk_indices`/`num_chunks`/`empty_mask`/
+  `cache_indices`，`allocate`/`can_fit`/`fill`）与 `fla_gdn_padded_metadata_supported()` 探测；
+- `ascend_gdn_backend.py`：`supports_prefill_graph_extend()`、`prefill_graph_extend_active()`、
+  `init_prefill_graph_metadata()`、`refresh_prefill_graph_metadata()`，captured 模式下
+  `prepare_gdn_inputs()` 直接绑定静态表，`forward_extend()` 的 conv/状态读写改用容量表，
+  `chunk_gdn()` 用 `empty_mask` 做零长序列的状态保持；
+- 手测 `test/manual/ascend/test_fla_a5_gdn_backend.py::PrefillGraphMetadataTest`
+  校验容量表内容、pad 行 `valid <= 0`、空序列掩码与 pad slot。
+
+算子侧完成后，只需把 `GDN_PADDED_METADATA_SUPPORTED` 置为 `True`（并完成 NPU 实测），
+调用方无需再改代码即可打开 `--cuda-graph-backend-prefill breakable` 的 GDN 捕获。
+
+

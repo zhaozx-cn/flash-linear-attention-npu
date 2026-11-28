@@ -798,10 +798,25 @@ for _name in _ASCENDC_OPS:
 
 _prepare_direct_runtime(raise_on_error=False)
 
+# Capability flag for callers that capture the GDN extend inside a graph.
+#
+# A graph replay reuses the captured tensor addresses and shapes, so
+# ``cu_seqlens``/``chunk_indices`` have to live in capacity-sized buffers that
+# are refreshed in place: padded sequences are empty and padded chunk rows point
+# past a sequence end. The arch35 kernels now treat the metadata as the source of
+# truth for the chunk count (``cu_seqlens`` scan) and clamp their task space, so
+# padded rows never run and exact-length tables keep every task. This covers the
+# fused operator and the prepare / ChunkFwdH / ChunkFwdO composite used on
+# Ascend950. Still to be validated on hardware: precision of every varlen path
+# with a padded table, and the A2/A3 (arch22) implementations, which are
+# unchanged.
+GDN_PADDED_METADATA_SUPPORTED = True
+
 __all__ = [
     "BACKENDS",
     "BACKWARD_OPS",
     "FALLBACKS",
+    "GDN_PADDED_METADATA_SUPPORTED",
     "MUTATED_ARGUMENTS",
     "MUTATION_FLAGS",
     "install_legacy_torch_ops_warning",

@@ -62,6 +62,11 @@ public:
         if (idx != nullptr) {
             gmIdx.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(idx));
         }
+        // Capacity-sized (padded) chunk_indices tables: keep the task space on the
+        // chunks the metadata actually describes.
+        if (cu != nullptr) {
+            ClampTotalChunksToMetadata();
+        }
         gmGOut.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(gOut));
         gmW.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(wOut));
         gmU.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(uOut));

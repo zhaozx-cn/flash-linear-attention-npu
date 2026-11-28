@@ -47,6 +47,12 @@ A5 依次调度 `ChunkGatedDeltaRuleFwdPrepare`、`ChunkFwdH` 和 `ChunkFwdO`，
 因此下列契约由调用方保证，host 侧不再校验：`cuSeqlensOptional` 首项为 0、单调不降、末项等于 `T`；
 `chunkIndicesOptional` 按 canonical sequence-major 顺序排列，且其长度等于各序列 `ceil(len/chunkSize)` 之和。
 
+> 图捕获场景：`chunkIndicesOptional` 的长度决定 `NT`/workspace，而真实 chunk 数是数据相关的。
+> 算子支持**容量化表**：当 `chunkIndicesOptional` 按 token bucket 预留容量、尾部填充指向
+> "越过序列末尾"的 pad 行时，arch35 kernel 会用 `cu_seqlens` 推出真实 chunk 数并把 task 空间
+> 收小（pad 行不执行）；精确长度表下该收小是 no-op，行为逐位不变。细节见
+> [`docs/device-metadata-arch35.md`](docs/device-metadata-arch35.md) 第 8 节。
+
 ## 输出
 
 | 名称 | 必选性 | Shape/Dtype | 说明 |

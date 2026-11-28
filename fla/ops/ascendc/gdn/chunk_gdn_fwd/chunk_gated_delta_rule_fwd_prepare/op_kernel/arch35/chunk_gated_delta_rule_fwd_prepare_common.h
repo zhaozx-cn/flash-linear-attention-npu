@@ -302,6 +302,7 @@ struct PrepareState {
         allowNegEigval = td.scaleBetaByTwoWhenNegEigval;
         useExp2 = td.useExp2ForGateCumsum;
         totalChunks = td.totalChunkTileCount;
+        seqCount = td.packedSequenceCount;
         outputA = td.hasAOutput;
         if (chunkSize <= 0) {
             chunkSize = kGdnChunkSize;
@@ -345,6 +346,35 @@ struct PrepareState {
         return w;
     }
 
+    // Capacity-sized (padded) metadata: host tiling derives totalChunkTileCount
+    // from the chunk_indices shape, which a graph-captured capacity table pads up
+    // to the token bucket's worst case. Derive the real chunk count from
+    // cu_seqlens and clamp the task space, so padded rows never run: a padded
+    // chunk starts past its sequence end and would read/write the next
+    // sequence's rows. For exact tables the clamp is a no-op.
+    //
+    // Must be called after gmCu is bound and LoadTiling() has run.
+    __aicore__ inline void ClampTotalChunksToMetadata()
+    {
+        if (isVariable == 0 || seqCount <= 0 || HV <= 0 || chunkSize <= 0) {
+            return;
+        }
+        int64_t chunks = 0;
+        int64_t previous = gmCu.GetValue(0);
+        for (int64_t seq = 1; seq <= seqCount; ++seq) {
+            const int64_t current = gmCu.GetValue(seq);
+            const int64_t length = current - previous;
+            if (length > 0) {
+                chunks += CeilDiv(length, chunkSize);
+            }
+            previous = current;
+        }
+        const int64_t activeTiles = chunks * HV;
+        if (activeTiles < totalChunks) {
+            totalChunks = activeTiles;
+        }
+    }
+
     // First HV of an HK group owns L2Norm(q/k) and Cube kkt.
     __aicore__ inline bool OwnsHk(int64_t hv) const
     {
@@ -374,6 +404,7 @@ struct PrepareState {
     int64_t isVariable, hasChunkIndices;
     int64_t useQkL2norm, useGateInKernel, useBetaSigmoid, hasDtBias, allowNegEigval, useExp2;
     int64_t totalChunks, outputA;
+    int64_t seqCount;
     int64_t coreIdx, numCore, subBlock, auxReady;
 };
 

@@ -41,6 +41,30 @@ public:
         o_ = o;
         workspace_ = workspace;
         tiling_ = *tilingData;
+        // Capacity-sized (padded) chunk tables: host tiling derives chunkNum from the
+        // chunk_indices shape, which a graph-captured capacity table pads up to the
+        // token bucket's worst case. Clamp the task space to the chunks cu_seqlens
+        // actually describes; a padded row starts past its sequence end, so decoding
+        // it would read and write the next sequence's rows. Exact tables keep every
+        // task, so the clamp changes nothing for them.
+        if (tiling_.isVariedLen != 0 && cuSeqlens != nullptr && tiling_.chunkSize > 0 &&
+            tiling_.tokenBatch > 0) {
+            AscendC::GlobalTensor<int64_t> cu;
+            cu.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cuSeqlens));
+            int64_t chunks = 0;
+            int64_t previous = cu.GetValue(0);
+            for (int64_t seq = 1; seq <= tiling_.tokenBatch; ++seq) {
+                const int64_t current = cu.GetValue(seq);
+                const int64_t length = current - previous;
+                if (length > 0) {
+                    chunks += (length + tiling_.chunkSize - 1) / tiling_.chunkSize;
+                }
+                previous = current;
+            }
+            if (chunks < tiling_.chunkNum) {
+                tiling_.chunkNum = chunks;
+            }
+        }
     }
 
     __aicore__ inline void Process()

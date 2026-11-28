@@ -336,6 +336,30 @@ __aicore__ inline void RunPhase6(
     Arch35ChunkGatedDeltaRuleCoefficientTiling coefficient{};
     CopyCoefficientTiling(&phase6->coefficient, coefficient);
 
+    // Capacity-sized (padded) metadata: host tiling only sees the shape of
+    // cu_seqlens/chunk_indices, so NT covers the token bucket's worst case (every
+    // sequence contributing one partial chunk). Derive the real chunk count from
+    // the metadata -- the same scan BuildHoPipelineContext performs and the H/O
+    // schedulers repeat -- and clamp the task space, so a padded table executes
+    // exactly the task set its exact-length counterpart would. For exact tables
+    // the clamp is a no-op; padded chunk rows must never be decoded, because the
+    // solve / recompute stages would read and write past a sequence end.
+    uint64_t activeChunks = hoPipelineContext.chunksPerPhysicalBatch;
+    if (activeChunks == 0 || activeChunks > coefficient.NT) {
+        // Dense batches (no metadata) and inconsistent tables keep the tiling
+        // contract; only a genuinely smaller real count clamps.
+        activeChunks = coefficient.NT;
+    }
+    if (activeChunks < coefficient.NT) {
+        coefficient.NT = activeChunks;
+        coefficient.totalChunks = static_cast<int64_t>(activeChunks);
+        coefficient.taskNum = coefficient.B * coefficient.Hv * activeChunks;
+        coefficient.totalTiles = static_cast<int64_t>(coefficient.taskNum);
+        coefficient.tilesPerCore = static_cast<int64_t>(
+            HoCeilDiv(coefficient.taskNum,
+                      coefficient.usedAicNum > 0 ? coefficient.usedAicNum : 1));
+    }
+
     GM_ADDR scoreWorkspace = userWorkspace + phase6->scoreWorkspaceOffset;
     GM_ADDR aWorkspace = userWorkspace + phase6->aWorkspaceOffset;
     GM_ADDR solveWorkspaceBase = userWorkspace + phase6->solveWorkspaceOffset;
@@ -422,6 +446,13 @@ __aicore__ inline void RunPhase6(
     GM_ADDR vNew = userWorkspace + stateOutputTiling->vNewIntermediateOffset;
     GdnMegaArch35RecomputeWUTilingData recomputeTiling{};
     CopyRecomputeTiling(&stateOutputTiling->recompute, recomputeTiling);
+    // recompute walks B * NT chunks: dense tables keep B batches of the same chunk
+    // count, varlen tables are packed (B == 1).
+    const uint64_t activeRecomputeChunks = coefficient.B * activeChunks;
+    if (static_cast<uint64_t>(recomputeTiling.chunkNum) > activeRecomputeChunks) {
+        // Same capacity clamp as the coefficient stages: only the real chunks run.
+        recomputeTiling.chunkNum = static_cast<int64_t>(activeRecomputeChunks);
+    }
     if constexpr (Arch35GdnSyncTraits<Variant>::kB30) {
         DispatchRecompute<InputT, float, 128, true>(
             k, v, beta, A, gCumsumBht, cuSeqlens, chunkIndices, w, u,
